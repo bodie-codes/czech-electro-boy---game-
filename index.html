@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Czech Electro boy</title>
+<style>
+  :root{--bg1:#0b1220;--bg2:#0f2a52;--accent:#ffd94a;--card:#ffd6a8}
+  html,body{height:100%;margin:0;font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial}
+  .wrap{display:flex;flex-direction:column;height:100vh;background:linear-gradient(180deg,var(--bg1),var(--bg2));color:white;align-items:center;justify-content:center}
+  canvas{display:block;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.6);background:transparent}
+  .ui{position:fixed;left:16px;top:16px;display:flex;gap:12px;align-items:center}
+  .panel{background:rgba(255,255,255,0.06);backdrop-filter:blur(6px);padding:10px 14px;border-radius:10px;font-weight:700}
+  .controls{position:fixed;right:16px;top:16px;display:flex;gap:10px}
+  button{background:var(--card);border:none;padding:8px 12px;border-radius:10px;font-weight:700;cursor:pointer}
+  .centerUI{position:fixed;left:50%;top:12%;transform:translateX(-50%);display:flex;gap:8px}
+  .big{font-size:22px}
+  .small{font-size:13px}
+  .footer{position:fixed;left:0;right:0;bottom:12px;text-align:center;opacity:0.8;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="game" width="960" height="480" role="img" aria-label="Hra Electro boy"></canvas>
+  <div class="ui">
+    <div class="panel">Skóre: <span id="score">0</span></div>
+    <div class="panel">Kredity: <span id="credits">0</span></div>
+    <div class="panel">Top: <span id="high">0</span></div>
+  </div>
+  <div class="controls">
+    <button id="start">Start</button>
+    <button id="retry">Opakovat</button>
+    <button id="mute">Vypnout zvuk</button>
+  </div>
+  <div class="centerUI">
+    <div class="panel big">Electro boy ⚡</div>
+    <div class="panel small">Přeskakuj překážky a sbírej elektřinu!</div>
+  </div>
+  <div class="footer">Použij mezerník / šipku nahoru nebo klepni pro skok. Hra se zrychluje postupně.</div>
+</div>
+
+<script>
+/*
+  Czech Electro boy - single file game
+  Features:
+  - Parallax background
+  - Cartoonish character drawn with canvas
+  - Obstacles and "electricity" pick-ups
+  - Increasing speed over time
+  - High score stored in localStorage
+  - Retry and Start, mute button
+  - Funny sounds via WebAudio (no external files)
+*/
+
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+let W = cvs.width, H = cvs.height;
+const scoreEl = document.getElementById('score');
+const creditsEl = document.getElementById('credits');
+const highEl = document.getElementById('high');
+const startBtn = document.getElementById('start');
+const retryBtn = document.getElementById('retry');
+const muteBtn = document.getElementById('mute');
+
+// Audio
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let muted = false;
+function beep(type='ping', time=0, freq=440, dur=0.08){
+  if(muted) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type==='ping' ? 'sine' : type==='boop' ? 'square' : 'sawtooth';
+  o.frequency.value = freq;
+  g.gain.value = 0.0001;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(audioCtx.currentTime + time);
+  g.gain.exponentialRampToValueAtTime(0.09, audioCtx.currentTime + time + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + time + dur);
+  o.stop(audioCtx.currentTime + time + dur + 0.02);
+}
+function funnySound(name){
+  if(muted) return;
+  if(name==='jump') { beep('ping',0,520,0.12); beep('sawtooth',0.06,880,0.08); }
+  if(name==='collect') { beep('ping',0,980,0.06); beep('ping',0.05,1400,0.04); }
+  if(name==='hit') { beep('square',0,120,0.25); }
+  if(name==='gameover') { beep('sawtooth',0,160,0.35); beep('square',0.05,80,0.4); }
+}
+
+// Game state
+let running = false;
+let gameSpeed = 3; // base
+let spawnTimer = 0;
+let spawnInterval = 90;
+let obstacles = [];
+let pickups = [];
+let score = 0;
+let credits = 0;
+let high = localStorage.getItem('electro_high') || 0;
+highEl.textContent = high;
+
+// Background parallax layers
+const bgLayers = [
+  {speed:0.2, color1:'#071028', color2:'#0b1b37', stars:120},
+  {speed:0.5, color1:'#07243a', color2:'#0f3b67', clouds:8},
+  {speed:1.0, color1:'#0c4a77', color2:'#13629a', hills:6}
+];
+const bgObjects = [];
+for(let i=0;i<bgLayers.length;i++){
+  bgObjects.push([]);
+  const count = (bgLayers[i].stars||bgLayers[i].clouds||bgLayers[i].hills)||20;
+  for(let j=0;j<count;j++){
+    bgObjects[i].push({x:Math.random()*W,y:Math.random()*H*0.6,size:Math.random()*2+1,off:Math.random()});
+  }
+}
+
+// Player
+const player = {
+  x:120, y: H-120, w:48, h:64, vy:0, grounded:false, color:'#4de', blink:0
+};
+
+function reset(){
+  running=false; gameSpeed=3; spawnTimer=0; spawnInterval=90; obstacles=[]; pickups=[]; score=0; credits=0; player.y=H-120; player.vy=0; player.grounded=false; scoreEl.textContent=0; creditsEl.textContent=0; high = Math.max(high, localStorage.getItem('electro_high')||0); highEl.textContent = high;
+}
+reset();
+
+// Resize helper
+function resize(){
+  const ratio = window.devicePixelRatio||1;
+  // keep internal resolution fixed for simplicity but scale canvas on CSS if screen smaller
+}
+
+// Input
+let touchDown=false;
+function jump(){
+  if(!player.grounded) return;
+  player.vy = -12 - Math.min(gameSpeed/2,6);
+  player.grounded=false;
+  funnySound('jump');
+}
+window.addEventListener('keydown', e=>{
+  if(e.code==='Space' || e.code==='ArrowUp'){
+    e.preventDefault();
+    if(!running) startGame(); else jump();
+  }
+});
+window.addEventListener('touchstart', e=>{ e.preventDefault(); if(!running) startGame(); else jump(); });
+
+startBtn.addEventListener('click', ()=>{ startGame(); });
+retryBtn.addEventListener('click', ()=>{ reset(); startGame(); });
+muteBtn.addEventListener('click', ()=>{ muted=!muted; muteBtn.textContent = muted ? 'Zvuk zapnout' : 'Vypnout zvuk'; if(!muted) audioCtx.resume(); });
+
+function startGame(){
+  if(!running){ running=true; funnySound('collect'); }
+}
+
+// Create obstacles and pickups
+function spawn(){
+  const r = Math.random();
+  const gap = 40 + Math.random()*60;
+  // obstacle
+  obstacles.push({x:W+40, y:H-92, w:36+Math.random()*34, h:48, passed:false});
+  // sometimes spawn a pickup above
+  if(Math.random()<0.6){
+    pickups.push({x:W+40+Math.random()*80, y:H-150-Math.random()*80, r:12, vx:-gameSpeed-1});
+  }
+}
+
+// Collision helper
+function rectsOverlap(a,b){
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// Main loop
+let last = 0;
+function loop(ts){
+  const dt = Math.min(32, ts - last); last = ts;
+  ctx.clearRect(0,0,W,H);
+
+  // draw gradient sky
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#071028'); g.addColorStop(1,'#0b2a47'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  // parallax layers
+  bgLayers.forEach((layer,i)=>{
+    const objs = bgObjects[i];
+    objs.forEach(o=>{
+      o.x -= layer.speed * (gameSpeed/3);
+      if(o.x < -100) o.x = W + 100;
+      if(layer.stars){ ctx.fillStyle = 'rgba(255,255,255,'+ (0.4+0.6*o.off) +')'; ctx.fillRect(o.x, o.y, o.size, o.size); }
+      if(layer.clouds){ // soft cloud
+        ctx.beginPath(); ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.ellipse(o.x,o.y,40+o.size*20,18+o.size*6,0,0,Math.PI*2); ctx.fill(); }
+      if(layer.hills){ ctx.beginPath(); ctx.fillStyle = 'rgba(10,60,120,0.4)'; ctx.moveTo(o.x-60,H-60); ctx.quadraticCurveTo(o.x,H-120,o.x+60,H-60); ctx.lineTo(o.x+60,H); ctx.lineTo(o.x-60,H); ctx.fill(); }
+    });
+  });
+
+  // ground
+  ctx.fillStyle = '#132a3f'; ctx.fillRect(0,H-60,W,60);
+
+  if(running){
+    // physics
+    player.vy += 0.6; player.y += player.vy; if(player.y + player.h >= H-60){ player.y = H-60 - player.h; player.vy = 0; player.grounded=true; }
+    // update obstacles
+    for(let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i]; o.x -= gameSpeed; if(!o.passed && o.x + o.w < player.x){ o.passed=true; score += 10; scoreEl.textContent = score; }
+      if(o.x + o.w < -100) obstacles.splice(i,1);
+      // collision
+      if(rectsOverlap(player,o)){
+        // hit
+        running=false; funnySound('hit'); funnySound('gameover');
+        // store high score & credits
+        const prevHigh = Number(localStorage.getItem('electro_high')||0);
+        if(score>prevHigh) localStorage.setItem('electro_high', score);
+      }
+    }
+    // pickups
+    for(let i=pickups.length-1;i>=0;i--){
+      const p = pickups[i]; p.x -= gameSpeed + 1; if(p.x < -40) pickups.splice(i,1);
+      // collision simulated as circle vs player box
+      const dx = Math.max(player.x, Math.min(p.x, player.x+player.w));
+      const dy = Math.max(player.y, Math.min(p.y, player.y+player.h));
+      const dist = Math.hypot(p.x - (player.x+player.w/2), p.y - (player.y+player.h/2));
+      if(dist < p.r + Math.max(player.w, player.h)/2){ pickups.splice(i,1); credits += 1; funnySound('collect'); creditsEl.textContent = credits; }
+    }
+
+    // spawn logic
+    spawnTimer++;
+    if(spawnTimer > spawnInterval){ spawn(); spawnTimer=0; spawnInterval = 60 + Math.floor(Math.random()*80); }
+
+    // increase difficulty slowly
+    if(ts % 2000 < dt) gameSpeed += 0.12; // every ~2s increase
+  }
+
+  // draw pickups
+  pickups.forEach(p=>{
+    // glow
+    ctx.beginPath(); ctx.fillStyle = 'rgba(255,230,110,0.25)'; ctx.arc(p.x,p.y,p.r*2,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.fillStyle = '#ffd94a'; ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    // small spark
+    ctx.fillStyle='#fff'; ctx.fillRect(p.x-2,p.y-8,4,6);
+  });
+
+  // draw obstacles
+  obstacles.forEach(o=>{
+    ctx.save(); ctx.translate(o.x,o.y);
+    ctx.fillStyle = '#ff6b6b'; ctx.strokeStyle='#c84444'; ctx.lineWidth=3; roundRect(ctx,0,0,o.w,o.h,8,true,false);
+    // lightning icon
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.moveTo(o.w*0.4, o.h*0.15); ctx.lineTo(o.w*0.25, o.h*0.55); ctx.lineTo(o.w*0.5,o.h*0.55); ctx.lineTo(o.w*0.35,o.h*0.9); ctx.lineTo(o.w*0.75,o.h*0.4); ctx.lineTo(o.w*0.48,o.h*0.4); ctx.fill();
+    ctx.restore();
+  });
+
+  // draw player (cartoonish)
+  drawPlayer();
+
+  // HUD when not running
+  if(!running){
+    ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(W/2-180, H/2-80, 360, 140);
+    ctx.fillStyle='#fff'; ctx.font='22px system-ui'; ctx.textAlign='center';
+    ctx.fillText('Stiskni Start nebo mezerník pro spuštění', W/2, H/2-30);
+    ctx.font='16px system-ui'; ctx.fillText('Přeskakuj překážky — sbírej elektrinu pro kredity!', W/2, H/2+2);
+    ctx.fillText('Tip: hra se postupně zrychluje', W/2, H/2+36);
+  }
+
+  // draw ground decorations
+  ctx.fillStyle='rgba(255,255,255,0.03)'; for(let i=0;i<30;i++){ ctx.fillRect((i*230+ (Math.floor(ts/20)%230)), H-28, 70, 8); }
+
+  requestAnimationFrame(loop);
+}
+
+function drawPlayer(){
+  // shadow
+  ctx.beginPath(); ctx.fillStyle='rgba(0,0,0,0.25)'; ctx.ellipse(player.x+player.w/2, player.y+player.h+8, player.w*0.6, 10,0,0,Math.PI*2); ctx.fill();
+  // body
+  ctx.save(); ctx.translate(player.x, player.y);
+  // legs
+  ctx.fillStyle='#2b6'; roundRect(ctx,8,36,12,20,6,true,false);
+  roundRect(ctx,28,36,12,20,6,true,false);
+  // torso
+  roundRect(ctx,4,4,40,36,10,true,false);
+  // head
+  ctx.beginPath(); ctx.fillStyle='#4de'; ctx.ellipse(24, -6, 22,18,0,0,Math.PI*2); ctx.fill();
+  // eyes
+  ctx.fillStyle='#000'; ctx.beginPath(); ctx.ellipse(18,-10,4,5,0,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.ellipse(30,-10,4,5,0,0,Math.PI*2); ctx.fill();
+  // smile
+  ctx.beginPath(); ctx.strokeStyle='#032'; ctx.lineWidth=2; ctx.arc(24,-2,8,0,Math.PI*0.6); ctx.stroke();
+  // antenna / electric hair
+  ctx.beginPath(); ctx.strokeStyle='#ffd94a'; ctx.lineWidth=3; ctx.moveTo(34,-24); ctx.lineTo(46,-36); ctx.stroke();
+  // backpack / spark
+  ctx.fillStyle='#ffd94a'; ctx.fillRect(42,8,8,16);
+  ctx.restore();
+}
+
+function roundRect(ctx,x,y,w,h,r,fill,stroke){ if(typeof r==='undefined') r=5; ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); if(fill) ctx.fill(); if(stroke) ctx.stroke(); }
+
+requestAnimationFrame(loop);
+
+// store high score periodically
+setInterval(()=>{ const prev = Number(localStorage.getItem('electro_high')||0); if(score>prev) localStorage.setItem('electro_high', score); highEl.textContent = Math.max(prev, score); }, 1500);
+
+// expose small helper for embedding or download
+window.exportHTML = function(){ return document.documentElement.outerHTML; };
+
+</script>
+</body>
+</html>
