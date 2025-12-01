@@ -1,3 +1,9 @@
+Live demo
+You can try my site here: https://czechelectroboy.netlify.app/
+
+
+
+
 Czech Electro Boy
 
 A fast, lightweight 2D runner game built entirely with HTML, CSS, and JavaScript.
